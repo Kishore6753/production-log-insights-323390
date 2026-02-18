@@ -67,7 +67,7 @@ def _format_bytes(num_bytes: int) -> str:
 
 
 # PUBLIC_INTERFACE
-def get_zip_max_total_uncompressed_bytes(default: int = 10 * 1024 * 1024) -> int:
+def get_zip_max_total_uncompressed_bytes(default: int = 50 * 1024 * 1024) -> int:
     """
     Read the max total uncompressed bytes allowed when extracting zip archives.
 
