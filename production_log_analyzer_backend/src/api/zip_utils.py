@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import io
+import os
 import zipfile
 from dataclasses import dataclass
-from typing import Iterable, List, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 
 # Files we consider as "logs" inside a zip. (Lowercased match.)
 _ALLOWED_LOG_EXTENSIONS = {".log", ".txt", ".json", ".ndjson"}
+
+# Environment variable controlling how much total uncompressed data we will accept from a zip.
+# This protects against "zip bombs" while allowing operators to tune the limit.
+_ZIP_MAX_TOTAL_UNCOMPRESSED_ENV = "ZIP_MAX_TOTAL_UNCOMPRESSED_BYTES"
 
 
 @dataclass(frozen=True)
@@ -50,14 +55,58 @@ def _safe_member_path(name: str) -> str:
     return "/".join(parts) if parts else name
 
 
+def _format_bytes(num_bytes: int) -> str:
+    """Human-readable bytes for error messaging."""
+    if num_bytes < 1024:
+        return f"{num_bytes} B"
+    if num_bytes < 1024 * 1024:
+        return f"{num_bytes / 1024:.1f} KiB"
+    if num_bytes < 1024 * 1024 * 1024:
+        return f"{num_bytes / (1024 * 1024):.1f} MiB"
+    return f"{num_bytes / (1024 * 1024 * 1024):.2f} GiB"
+
+
 # PUBLIC_INTERFACE
-def extract_log_files_from_zip_bytes(zip_bytes: bytes, max_total_uncompressed: int = 10 * 1024 * 1024) -> Tuple[List[ExtractedZipTextFile], List[str]]:
+def get_zip_max_total_uncompressed_bytes(default: int = 10 * 1024 * 1024) -> int:
+    """
+    Read the max total uncompressed bytes allowed when extracting zip archives.
+
+    This is a safety control to mitigate zip-bomb style uploads, but can be configured
+    via env var for legitimate larger archives.
+
+    Env var:
+        ZIP_MAX_TOTAL_UNCOMPRESSED_BYTES: integer bytes (e.g. 52428800 for 50MiB)
+
+    Args:
+        default: Value to use when env var is unset or invalid.
+
+    Returns:
+        Configured maximum total uncompressed bytes (always a positive integer).
+    """
+    raw = os.getenv(_ZIP_MAX_TOTAL_UNCOMPRESSED_ENV)
+    if raw is None or raw.strip() == "":
+        return default
+
+    try:
+        val = int(raw.strip())
+        if val <= 0:
+            return default
+        return val
+    except Exception:
+        return default
+
+
+# PUBLIC_INTERFACE
+def extract_log_files_from_zip_bytes(
+    zip_bytes: bytes, max_total_uncompressed: Optional[int] = None
+) -> Tuple[List[ExtractedZipTextFile], List[str]]:
     """
     Extract log-like files from a zip archive.
 
     Args:
         zip_bytes: Raw uploaded zip file bytes.
         max_total_uncompressed: Safety limit across extracted files, to avoid zip bombs.
+            If None, will be loaded from ZIP_MAX_TOTAL_UNCOMPRESSED_BYTES env var (default 10MiB).
 
     Returns:
         (files, warnings)
@@ -69,6 +118,12 @@ def extract_log_files_from_zip_bytes(zip_bytes: bytes, max_total_uncompressed: i
     """
     warnings: List[str] = []
     extracted: List[ExtractedZipTextFile] = []
+
+    limit = (
+        int(max_total_uncompressed)
+        if max_total_uncompressed is not None
+        else get_zip_max_total_uncompressed_bytes()
+    )
 
     try:
         with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
@@ -89,9 +144,12 @@ def extract_log_files_from_zip_bytes(zip_bytes: bytes, max_total_uncompressed: i
             for info in allowed_infos:
                 # Basic bomb guard: sum declared uncompressed sizes.
                 total_uncompressed += int(info.file_size or 0)
-                if total_uncompressed > max_total_uncompressed:
+                if total_uncompressed > limit:
                     raise ValueError(
-                        f"Zip archive expands beyond safety limit ({max_total_uncompressed} bytes)."
+                        "Zip archive rejected: total uncompressed size "
+                        f"{_format_bytes(total_uncompressed)} exceeds safety limit "
+                        f"{_format_bytes(limit)} ({limit} bytes). "
+                        f"To increase, set env var {_ZIP_MAX_TOTAL_UNCOMPRESSED_ENV}."
                     )
 
                 try:

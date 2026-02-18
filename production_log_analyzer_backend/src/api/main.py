@@ -7,7 +7,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from src.api.log_analysis import analyze_events, parse_log_bytes
-from src.api.zip_utils import combine_extracted_text_files, extract_log_files_from_zip_bytes
+from src.api.zip_utils import (
+    combine_extracted_text_files,
+    extract_log_files_from_zip_bytes,
+    get_zip_max_total_uncompressed_bytes,
+)
 
 
 class AnalysisOptions(BaseModel):
@@ -132,13 +136,16 @@ async def upload_and_analyze_logs(
 
     # If it's a zip, extract and combine supported members, then reuse existing parser.
     if _looks_like_zip(file.filename, file.content_type):
+        # Zip bomb protection (configurable). This limits the total *expanded* size of all
+        # allowed members (.log/.txt/.json/.ndjson) extracted from the archive.
+        zip_max_uncompressed = get_zip_max_total_uncompressed_bytes()
         try:
             extracted, zip_warnings = extract_log_files_from_zip_bytes(
                 raw,
-                # Keep consistent with existing upload limit; uncompressed total limited too.
-                max_total_uncompressed=10 * 1024 * 1024,
+                max_total_uncompressed=zip_max_uncompressed,
             )
         except ValueError as e:
+            # Keep status 400, but provide clearer actionable detail.
             raise HTTPException(status_code=400, detail=str(e)) from e
 
         parse_warnings.extend(zip_warnings)
